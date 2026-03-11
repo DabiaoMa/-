@@ -814,3 +814,73 @@ def calculate_probability(data):
         prob = max(0.0, min(1.0, prob))
 
         return score_before_normalized, prob
+```
+
+### 案例 3：外调BGE模型、挖掘APP list
+
+```python
+def calculate_probability(data):
+
+        import math # 这一行不要改，且必须在calculate_probability函数中
+        import numpy as np # 这一行不要改，必须在calculate_probability函数中
+        import pandas as pd # 这一行不要改，必须在calculate_probability函数中
+        import re # 这一行不要改，必须在calculate_probability函数中
+        import requests # 这一行不要改，必须在calculate_probability函数中
+
+
+        # 不要改，必须在calculate_probability函数中
+        def NLP_server(text, model):
+            # text必须是非空文本
+            response = requests.post("http://11.7.49.198:5001/predict", json={"text": text, "model": model})
+            return response.json()
+
+        base_score = 0.0
+
+        # 定义高风险贷款APP集合（覆盖样本中高频逾期相关APP）
+        HIGH_RISK_APPS = {"奇富借条", "360借条", "安逸花", "省呗", "拍拍贷", "宜享花", "极融借款", "榕树贷款", "人品贷", "小赢卡贷", "豆豆钱", "花鸭借钱", "万卡", "58好借", "众安贷", "南银法巴消金", "中原消费金融", "晋商消费金融", "海尔消费金融", "马上消费金融", "还呗", "招联消费", "桔多多", "马上金融", "有钱花", "度小满", "网商贷", "蚂蚁借呗", "腾讯微粒贷", "小米贷款", "苏宁任性付", "洋钱罐借款", "好分期"}
+
+        # 处理字段A：文本预处理+向量生成+相似度计算+高风险APP计数
+        A = data.get('A')
+        # 步骤1：文本预处理（分割、去重、排序、拼接）
+        if not isinstance(A, str):
+            processed_A_text = '空应用列表' if A is None else str(A).strip()
+            apps = []
+        else:
+            processed_A_text = A.strip()
+            if processed_A_text:
+                apps = [app for app in processed_A_text.split('^') if app.strip()]
+                unique_sorted_apps = sorted(set(apps))
+                processed_A_text = ' '.join(unique_sorted_apps)
+            else:
+                processed_A_text = '空应用列表'
+                apps = []
+        # 步骤2：计算高风险APP计数
+        high_risk_count = sum(1 for app in apps if app in HIGH_RISK_APPS)
+
+        # 步骤3：生成样本向量和贷款APP基准向量
+        sample_vector = NLP_server(processed_A_text, "bge向量模型")
+        benchmark_text = "360借条 奇富借条 安逸花 京东金融 借呗 有钱花 分期乐 微粒贷 金条 国美金融 马上金融 拍拍贷 宜人贷 陆金所 网商贷 度小满 招联金融 蚂蚁借呗 腾讯微粒贷 小米贷款 苏宁任性付 洋钱罐借款 好分期 宜享花 极融借款 榕树贷款 人品贷 小赢卡贷 豆豆钱 花鸭借钱 万卡 58好借 众安贷 南银法巴消金 中原消费金融 晋商消费金融 海尔消费金融 马上消费金融"
+        benchmark_vector = NLP_server(benchmark_text, "bge向量模型")
+        
+        # 步骤4：计算语义相似度（内积）
+        similarity = sum(sv * bv for sv, bv in zip(sample_vector, benchmark_vector))
+        
+        # 步骤5：复杂交互+复合函数计算调整分（优化参数+风险计数协同）
+        # 交互项：结合相似度与高风险APP数量的非线性协同效应
+        interaction = similarity * math.sqrt(high_risk_count + np.float64(0.1)) + np.float64(0.1) * math.log1p(high_risk_count)
+        # 优化后的分段复合参数
+        exp_coef = np.float64(3.0504186180842905)
+        exp_const = np.float64(2.5429628210345525)
+        log_coef = np.float64(10.0)
+        
+        if interaction >= 0:
+            adjustment = math.exp(exp_coef * interaction) - exp_const
+        else:
+            adjustment = -log_coef * math.log1p(-interaction) + (high_risk_count * np.float64(-2.0))
+
+        score_before_normalized = base_score + adjustment
+
+        prob = 1 / (1 + math.exp(-score_before_normalized))
+        prob = max(0.0, min(1.0, prob))
+
+        return score_before_normalized, prob
