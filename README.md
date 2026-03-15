@@ -884,3 +884,222 @@ def calculate_probability(data):
         prob = max(0.0, min(1.0, prob))
 
         return score_before_normalized, prob
+```
+
+### 案例 4：量化挖掘时序数据特征因子
+```python
+def calculate_probability(data):
+
+        import math # 这一行不要改，且必须在calculate_probability函数中
+        import numpy as np # 这一行不要改，必须在calculate_probability函数中
+        import pandas as pd # 这一行不要改，必须在calculate_probability函数中
+        import re # 这一行不要改，必须在calculate_probability函数中
+
+        def parse_series(s):
+            if isinstance(s, str):
+                try:
+                    elements = s.strip('[]').split(',')
+                    return np.array([float(e.strip()) for e in elements if e.strip()], dtype=np.float64)
+                except:
+                    return np.array([], dtype=np.float64)
+            elif isinstance(s, list):
+                try:
+                    return np.array([float(e) for e in s if e is not None], dtype=np.float64)
+                except:
+                    return np.array([], dtype=np.float64)
+            else:
+                return np.array([], dtype=np.float64)
+
+        def compute_recent_trend(series):
+            if len(series) == 0:
+                return 0.0
+            lookback = int(19.171011214236195)
+            prev_default = 2.0
+            current_default = 0.0
+            prev = series[-lookback] if len(series)>=lookback else (series[0] if len(series)>0 else prev_default)
+            current = series[-1] if len(series)>0 else current_default
+            return (current - prev)/prev if prev!=0 else (current - prev)
+
+        def compute_volatility(series):
+            window_size = int(19.187825821221775)
+            min_length = int(1.0)
+            vol_default = 1.0
+            return np.std(series[-min(window_size, len(series)):]) if len(series)>=min_length else vol_default
+
+        def composite_function(x):
+            scale = 0.5
+            return scale * x * math.log(1 + math.exp(x))
+
+        # 扩展特征集：加入未使用的A/B/C
+        series_dict = {
+            'H': parse_series(data.get('H')), 'G': parse_series(data.get('G')),
+            'D': parse_series(data.get('D')), 'E': parse_series(data.get('E')),
+            'F': parse_series(data.get('F')), 'A': parse_series(data.get('A')),
+            'B': parse_series(data.get('B')), 'C': parse_series(data.get('C'))
+        }
+
+        trend_scores = []
+        vol_base = 1.5
+        # 存储每个序列的趋势方向和波动率
+        trend_directions = []
+        volatilities = []
+        for series in series_dict.values():
+            trend = compute_recent_trend(series)
+            vol = compute_volatility(series)
+            trend_scores.append(trend * (vol_base + vol))
+            # 趋势方向计算（参数化部分）
+            min_len = int(np.float64(6.823680547337566))
+            prev_default = np.float64(6.38136664191722)
+            pos_dir = np.float64(3.696374695829269)
+            neg_dir = np.float64(0.9)
+            if len(series) >= min_len:
+                prev = series[-min_len] if len(series) >= min_len else prev_default
+                current = series[-1]
+                direction = pos_dir if current > prev else neg_dir
+            else:
+                direction = neg_dir
+            trend_directions.append(direction)
+            volatilities.append(vol)
+
+        combined_trend_default = np.float64(-0.1)
+        combined_trend = np.mean(trend_scores) if trend_scores else combined_trend_default
+
+        # 步骤1：计算趋势一致性得分（TAS）
+        if trend_directions:
+            tas = np.mean(trend_directions)
+        else:
+            tas = 0.0
+        # 步骤2：计算波动率惩罚项（参数化方向判断）
+        positive_vols = [vol for vol, dir in zip(volatilities, trend_directions) if dir == np.float64(3.696374695829269)]
+        vp = np.mean(positive_vols) if positive_vols else 0.0
+        # 步骤3：构建复合调整因子（CAF，参数化权重）
+        tas_weight = np.float64(6.689997027009254)
+        vp_weight = np.float64(1.1990850901566357)
+        caf = 1 / (1 + math.exp(-(tas * tas_weight - vp * vp_weight)))
+        # 步骤4：融合调整因子
+        adjusted_combined_trend = combined_trend * caf
+
+        # 新增步骤：基于E/F比值的价格动量调整
+        e_series = series_dict['E']
+        f_series = series_dict['F']
+        min_len_ef = min(len(e_series), len(f_series))
+        e_series = e_series[:min_len_ef]
+        f_series = f_series[:min_len_ef]
+        # 参数化：E+epsilon避免除零
+        epsilon = np.float64(3.2918446542703608)
+        ratios = [f / (e + epsilon) for e, f in zip(e_series, f_series)]
+        # 参数化：均值默认值
+        mean_ratio_default = np.float64(0.0)
+        mean_ratio = np.mean(ratios) if len(ratios) > 0 else mean_ratio_default
+        # 参数化：调整因子计算
+        subtract_val = np.float64(2.0)
+        multiply_factor = np.float64(5.0)
+        ratio_adjustment = (math.sqrt(mean_ratio) - subtract_val) * multiply_factor
+        adjusted_combined_trend += ratio_adjustment
+
+        # 新增步骤：E/F动量强度-置信度调整（避免失败路径的指数放大，改用高斯置信度）
+        if len(e_series) > 0 and len(f_series) > 0:
+            # 1. 每日动量强度：log(offset+F) - log(offset+E) 强化高F+低E信号（offset参数化）
+            log_offset = np.float64(3.0647388571355876)
+            ms = [math.log(log_offset + f) - math.log(log_offset + e) for e, f in zip(e_series, f_series)]
+            mean_ms = np.mean(ms)
+            # 2. 高斯置信度：惩罚极端值，强化均值附近的有效信号（μ,σ参数化）
+            mu = np.float64(2.882102114602435)
+            sigma = np.float64(0.14361591739919669)
+            gauss_two = np.float64(9.82308354484247)
+            confidence = math.exp(-(mean_ms - mu)**2 / (gauss_two * sigma**2))
+            # 3. 融合置信度：加权调整趋势项
+            adjusted_combined_trend *= confidence
+
+        # 新增步骤：支持-阻力不对称高斯增强因子（提升正类区分能力）
+        min_len_sr = min(len(e_series), len(f_series))
+        e_series = e_series[:min_len_sr]
+        f_series = f_series[:min_len_sr]
+        if len(e_series) == 0 or len(f_series) == 0:
+            support_resistance_factor = np.float64(1.0586711402378157)
+        else:
+            # 样本内E/F均值作为基准（避免全局过拟合）
+            mu_e = np.mean(e_series)
+            mu_f = np.mean(f_series)
+            sigma_sr = np.float64(0.7632960675241192)
+            # 支持强度：E越小（近期新低越近）强度越高（sigmoid函数）
+            sigmoid_num = np.float64(2.2531719226265583)
+            sigmoid_denom_const = np.float64(2.8135556757561857)
+            ss = sigmoid_num / (sigmoid_denom_const + np.exp((e_series - mu_e) / sigma_sr))
+            # 阻力强度：F越小（近期新高越近）强度越高（sigmoid函数）
+            rs = sigmoid_num / (sigmoid_denom_const + np.exp((f_series - mu_f) / sigma_sr))
+            # 支持-阻力差异高斯置信度：强化SS>RS（上涨信号）
+            sr_diff = ss - rs
+            gauss_factor = np.float64(3.1947060474923115)
+            confidence_sr = np.exp(-(sr_diff ** 2) / (gauss_factor * sigma_sr ** 2))
+            support_resistance_factor = np.mean(confidence_sr)
+        adjusted_combined_trend *= support_resistance_factor
+
+        # 新增步骤：突破性动量-趋势交互增强因子（提升正类区分能力）
+        if len(f_series) == 0:
+            breakout_factor = np.float64(1.0)
+        else:
+            # 1. 获取F序列的趋势方向（来自trend_directions列表，索引4对应F）
+            f_trend_idx = list(series_dict.keys()).index('F')
+            f_trend_dir = trend_directions[f_trend_idx] if f_trend_idx < len(trend_directions) else np.float64(0.9)
+            # 2. 计算F序列的近期新高proximity：F=0表示最新新高，proximity=1；F越大proximity越小
+            epsilon_prox = np.float64(1e-05)
+            f_proximity = [1.0 if x == 0 else 1/(x + epsilon_prox) for x in f_series]
+            # 3. 取最近recent_window期的平均proximity（聚焦近期信号）
+            recent_window = int(np.float64(10.0))
+            recent_f_proximity = np.mean(f_proximity[-recent_window:]) if len(f_proximity)>=recent_window else np.mean(f_proximity)
+            # 4. 交互：趋势方向（正趋势强化）× 近期新高proximity（新高强化）
+            breakout_interaction = f_trend_dir * recent_f_proximity
+            # 5. 复合算子：Logistic函数压缩到[0,1]，强化强信号
+            offset_break = np.float64(1.0)
+            breakout_factor = 1 / (1 + math.exp(-(breakout_interaction - offset_break)))
+        adjusted_combined_trend *= breakout_factor
+
+        # 新增步骤：E/F滚动动量不对称增强因子（核心优化）
+        if len(e_series) > 0 and len(f_series) > 0:
+            # 1. 计算滚动均值（平衡近期信号与历史噪声）- 参数化窗口大小
+            roll_window_size = int(np.float64(3.5817481166681344))
+            e_roll = np.convolve(e_series, np.ones(roll_window_size)/roll_window_size, mode='valid')
+            f_roll = np.convolve(f_series, np.ones(roll_window_size)/roll_window_size, mode='valid')
+            if len(e_roll) == 0 or len(f_roll) == 0:
+                # 参数化默认动量不对称值
+                momentum_asymmetry = np.float64(0.6457921086766887)
+            else:
+                # 2. 指数-逻辑斯蒂不对称得分：放大F上升/E下降的正向分歧
+                exp_term = np.exp(f_roll - e_roll)
+                asymmetry_score = exp_term / (1 + exp_term)  # 逻辑斯蒂压缩到[0,1]
+                momentum_asymmetry = np.mean(asymmetry_score)
+            # 3. 高斯置信度：抑制极端值（降低过拟合风险）- 参数化μ和σ
+            mu_ga = np.float64(0.5705150430473029)
+            sigma_ga = np.float64(0.5)
+            confidence_ga = math.exp(-(momentum_asymmetry - mu_ga)**2 / (2 * sigma_ga**2))
+            # 4. 融合增强因子
+            adjusted_combined_trend *= momentum_asymmetry * confidence_ga
+
+        # 新增步骤：近期E/F动量高斯放大器（提升正负样本区分度）- 参数化部分
+        window_size = int(np.float64(23.425601494637117))  # 参数化近期窗口大小
+        e_series_recent = e_series[-window_size:] if len(e_series)>=window_size else e_series
+        f_series_recent = f_series[-window_size:] if len(f_series)>=window_size else f_series
+        min_recent_len = min(len(e_series_recent), len(f_series_recent))
+        e_series_recent = e_series_recent[:min_recent_len]
+        f_series_recent = f_series_recent[:min_recent_len]
+        if min_recent_len == 0:
+            momentum_amplifier = np.float64(0.3032276527965791)  # 中性默认值，参数化
+        else:
+            # 计算每日动量项：低E/F=高动量（系数参数化）
+            coeff_momentum = np.float64(1.0605386800026377)
+            momentum_terms = [(coeff_momentum/(f + epsilon)) + (coeff_momentum/(e + epsilon)) for e, f in zip(e_series_recent, f_series_recent)]
+            mean_momentum = np.mean(momentum_terms)
+            # 高斯放大器：参数化μ、σ及分母系数
+            gauss_mean = np.float64(1.5)
+            gauss_sigma = np.float64(1.0)
+            denom_coeff = np.float64(2.3893422062986773)
+            momentum_amplifier = np.exp(-((mean_momentum - gauss_mean)**2) / (denom_coeff * gauss_sigma**2))
+        adjusted_combined_trend *= momentum_amplifier
+
+        score_before_normalized = composite_function(adjusted_combined_trend)
+
+        prob = 1 / (1 + math.exp(-score_before_normalized))
+        prob = max(0.0, min(1.0, prob))
+
+        return score_before_normalized, prob
